@@ -1,0 +1,377 @@
+1. On modifie le docker compose comme il le faut
+
+0. Fichier ".env". Avant d'aller plus loin, il faut également parler du fichier "".env". Il s'agit d'un fichier de configuration 
+qui permet de définir des variables d'environnement utilisées par le docker compose. Par défaut, Ton docker-compose.yml sait automatiquement 
+chercher les variables d’environnement externes depuis un fichier .env placé dans le même dossier que ton fichier docker-compose.yml,
+ sans que tu aies besoin de le spécifier manuellement. C’est un comportement standard de Docker Compose.
+Les variables du .env sont ensuite disponibles via la syntaxe ${VAR_NAME} dans ton YAML.
+La syntaxe ${VAR_NAME:-default_value} permet de définir une valeur par défaut si la variable n'est pas définie dans le fichier .env.
+On va utiliser nos variables d'environnement de cette manière. On va les utiliser pour :
+- image de airflow
+- ${_PIP_ADDITIONAL_REQUIREMENTS:-} (--> se renseigner la dessus afin de pouvoir ajouter des librairies pythons supplémentaires)
+- ${AIRFLOW_PROJ_DIR:-.} (--> répertoire de travail pour les DAGs, scripts et données)
+- $${HOSTNAME} --> mieux comprendre hostname
+- ${AIRFLOW_UID}
+- ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+- ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+- ${POSTGRES_USER}
+- ${POSTGRES_PASSWORD}
+- ${POSTGRES_DB}
+
+0. Avant d'aller' plus loin, il est également important d'expliquer ' comment fonctionne la gestion du volume dans docker.
+A. DOCKER et système de fichiers
+Un conteneur Docker est une boîte isolée. Par défaut, il ne voit aucun fichier de ta machine locale. 
+Tout ce que tu veux rendre visible doit être explicitement partagé via des volumes.
+Les volumes sont montés dans la section "volumes" de chauqe service qui doit accèder à des fichiers (Airflow, Postgres, etc.). 
+Exemple de montage :
+services:
+  airflow-webserver:
+    image: apache/airflow:2.10.5
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./config:/opt/airflow/config
+      - ./data:/opt/airflow/data
+  
+Il est également possible de définir des volumes nommés (souvent utilisés pour des DB ou la persistance des logs). On le fait souvent à la fin du docker-compose.
+volumes:
+  postgres-db-volume:
+  airflow-logs:
+Ensuite, on les attache à un service en particulier :
+services:
+  postgres:
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+B. Types de fichiers d'un projet ETL
+  1. Fichiers sources (en json, csv,..) stockés en local sur la machine. On voudra les lire dans notre DAG.
+  2. Fichiers intermédiaires (fichiers logs, csv, parquet,..) écrit dans le conteneur ou via volumes. On voudra y accèder pour les debugs. (MIEUX COMPRENDRE)
+  3. Fichiers de configuration (docker-compose.yaml, .env, DAGs, scripts python) : écrit en local et montés dans le conteneur. (MIEUX COMPRENDR)
+  --> où stocke-t-on les scripts python et les fichiers de output.
+C. Accèder à un fichier local depuis un conteneur docker
+On doit utliser un volume bind mount dans le docker-compose.yaml  :
+ volumes:
+  - ./dags:/opt/airflow/dags
+  - ./logs:/opt/airflow/logs
+  - ./plugins:/opt/airflow/plugins
+  - ./scripts:/opt/airflow/scripts  # <--- tu peux rajouter ceci
+  - ./data:/opt/airflow/data        # <--- si tu veux stocker ton JSON ici
+Ce qui veut dire : dans le dossier depuis lequel on lance le docker-compose, le sous-dossiers ./dags (sur ma machine locale) 
+est lié au dossier /opt/airflow/dags (dans mon conteneur Docker). Donc si je veux accèder aux fichiers du dossier .dags, depuis docker, je dois appeler 
+le sous dossier /opt/airflow/dags. 
+Exemple : Ainsi, si ton JSON est dans ./data/monfichier.json sur ta machine locale, alors dans ton DAG tu y accèdes via :
+file_path = "/opt/airflow/data/monfichier.json"
+
+
+D. Stocker des fichiers depuis Docker vers ma machine locale.
+La logique est la même, si j'écris un fichier dans un dossier monté en volume, alors ce fichier sera visible localement.
+Par exemple : ./data : /opt/airflow/data
+with open("/opt/airflow/data/output.json", "w") as f:
+    json.dump(obj, f)
+Alors, je pourrais récuperer ce fichier créer, dans mon sous dossier, ./data, en local.
+Il est également possivle de stocké des fichiers de manière temporaire, sur docker uniquement, si les fichiers ne sont pas stockés dans un dossier monté en volume.
+Le fichier existe alors uniquement dans Docker et sera supprimé à la suppression du conteneur.
+E. Bonnes pratiques :
+1. Lire/écrire des fichiers --> sous-dossier ./data monté
+2. Scripts python --> sous dossier ./scripts monté
+3. Fichiers temporaires --> /tmp de docker (gardez en tête que ca pourra être supprimé)
+4. Stockage en DB --> utiliser un volume docker
+
+F. Cas d'usage d'un service de DB (ex: Postgres, SQL Server, MySQL,...)
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data  # Persistance
+volumes:
+  postgres-db-volume:
+Et voici les bonnes pratiques :
+Pratique  Explication
+✅ Monter un volume persistant                        ----------->  Sinon les données sont perdues si tu arrêtes/supprimes le conteneur
+✅ Utiliser des variables d’environnement             ---------->   Pour définir les credentials sans les hardcoder
+✅ Se connecter via un service Docker (postgres)          ------>  Ex: host=postgres port=5432 au lieu de localhost
+✅ Gérer les migrations ou initialisations avec des scripts ---->  Tu peux ajouter des scripts .sql ou .py exécutés au démarrage
+
+
+
+
+On peut continuer avec l'analyse' de notre docker compose.
+
+A.  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5}  : on utilise la version 2.10.5 plutot que la 3.0
+B. on rajoute la ligne : AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 30  # Fréquence (en secondes) à laquelle le scheduler vérifie les nouveaux DAGs dans le dossier "dags"
+C. on rajoute la ligne : AIRFLOW__CORE__TEST_CONNECTION: Enabled # Active le test automatique des connexions dans l’interface UI (permet de valider facilement les connexions à une base de données ou API)
+D. on rajoute la ligne : AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'      # Permet d’afficher toute la configuration d’Airflow dans l'interface web (menu "Admin" > "Configurations")
+E. On désactive les exemples : AIRFLOW__CORE__LOAD_EXAMPLES: 'false' # Désactive les DAGs d'exemple
+F. On a rajouté 2 lignes dans la partie volumes :
+    - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/airflow/scripts
+    - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+    Ces lignes permettent de lier les dossiers locaux "scripts", "data" (en plus de logs, dags,config et "plugins") au conteneur Airflow, ce qui permet de gérer les DAGs, les logs et les plugins depuis l'extérieur du conteneur.
+La question du volume dans Docker est importante car elle permet de garder les données persistantes même si le conteneur est supprimé ou recréé. 
+En liant des dossiers locaux, on s'assure que les modifications apportées aux DAGs, scripts ou données sont immédiatement reflétées 
+dans le conteneur sans avoir à reconstruire l'image.
+Ce qu'on fait en pratique, c'est de créer un lien entre un dossier local sur notre machine (ou notre serveur) et un dossier virtuel dans le conteneur Docker.
+Dans notre cas, via airflow-common, on monte les volumes pour tout les services de airflow de notre docker compose. De cette manière, tout les services de airflow
+situés dans différents conteneurs pourront accèder aux fichiers et dossiers, ce qui est essentiel pour le bon fonctionnement de notre ETL.
+
+G. Il y a un service postgres, qui sera utilisé pour stocker les métadonnées d'Airflow. Dans notre cas, on ne modifie rien dans ce service.
+H. IL y a aussi un service redis, qui sera utilisé pour la gestion des files d'attente des tâches. Dans notre cas, on ne modifie rien dans ce service.
+I. Enfin, il y a les différents services de airflow : webserver, scheduler, worker,airflow-init, triggerer et flower. (mettre tableau qui explique).
+Chacun de ces services a un rôle spécifique dans l'architecture d'Airflow :
+   - **webserver** : Interface utilisateur pour visualiser et gérer les DAGs.
+   - **scheduler** : Planifie l'exécution des tâches dans les DAGs.
+   - **worker** : Exécute les tâches planifiées par le scheduler.
+   - **triggerer** : Gère les déclencheurs d'événements pour exécuter des tâches basées sur des événements externes.
+   - **flower** : Outil de surveillance et de gestion des workers Airflow.
+De plus, chacun de ces services est configuré via un "airflow-common" qui est un conteneur partagé entre tous les services de airflow.
+
+
+J. Dans notre service airflow-init, on utilise nos variables d'environnement "username" et"password" pour créer un utilisateur Airflow avec les droits d'administrateur.
+
+K. On ajoute également un autre service "postgreSQL", qui va nous servir comme base de données pour stocker les données de notre projet 
+(attention, différent du service postgres qui est utilisé pour stocker les métadonnées d'Airflow!!!).
+postgres_destination_server-project1 = nom du serveur
+#On utilise les variables d'environnement :
+POSTGRES_USER : ${POSTGRES_USER}
+POSTGRES_PASSWORD : ${POSTGRES_PASSWORD}
+POSTGRES_DB : ${POSTGRES_DB}
+# ici on modifie le port de postgreSQL pour éviter les conflits avec le service postgres d'Airflow
+# (qui est sur le port 5432 par défaut) en le changeant en 5433.
+Il y a 2 cas d'usages : on peut vouloir se connecter à la base de données PostgreSQL depuis l'extérieur du conteneur (par exemple, pour des requêtes SQL manuelles ou pour des applications externes)
+ou on peut vouloir que d'autres services dans le même réseau Docker accèdent à cette base de données. Dans les deux cas, il est important de s'assurer que le port est correctement exposé et mappé.
+Si on veut s'y connecte depuis l'exterieur du conteneur, depuis notre machine locale, on devra utiliser host = localhost et port = 5433
+Si on veut s'y connecter depuis un autre service de notre docker compose, on devra utiliser host = postgres_destination_server-project1 et port = 5432 (car dans le réseau Docker, le port est mappé à 5432).
+     ports: 
+          - "5433:5432"
+
+#ici on monte le volume pour la base de données PostgreSQL, afin de garder les données persistantes même si le conteneur est supprimé ou recréé.
+# La syntaxe est celle-ci :  <volume_source>:<container_destination>
+volume_source = un volume docker nommé (déclaré dans volumes:) ou un chemin local
+container_destination = un chemin vers le conteneur Docker.
+Dans notre cas, notre volume_source est un volume nommé Docker. Ce volume sera créé dans l'espace interne de docker, pas sur le disque directmeent accessible.
+ Et les données PostgreSQL seront stockées dans ce volume, géré par Docker, pas dans un dossier local visible.
+
+      volumes: 
+          - pg-data-project1:/var/lib/postgresql/data/
+
+
+L. On ajoute le dernier service dont on aura besoin : pg-admin, qui est une interface web graphique, utilisée pour gérer les bases de données PostgreSQL.
+ On pourra donc accèder à pgamdin via : localhost:8082
+    ports:
+      - "8082:80" 
+On utilise à nouveau des variables d environnement pour le username et le password de notre db.
+--> Il faut ajouter la sécurité de user et password par défaut au cas où les var d'environenemnt sont à manquer.
+On utilise à nouveau un volume docker nommé pour persister les données de pgadmin (connexion, préférences,...)
+
+M. Le dernier bloc déclare des volumes nommés que Docker va gérer automatiquement
+pour persister les données des services, même si les conteneurs sont supprimés ou recréés.
+  postgres-db-volume-project1:  #volume postgreSQL - Airflow metadata Database
+  pg-data-project1: # volume PostgreSQL - Destination Database
+  pgadmin-data-project1: # volume pgadmin - PostgreSQL interface
+
+
+
+
+2. Une fois que le docker compose est bien défini, on peut l'initialiser avec cette commande : docker compose -p airflow_project1 up airflow-init
+Dans cette commande, on fait attention également à renommer le nom de notre projet de docker compose par "airflow_project1". En effet, comme je travialle sur plusieurs 
+projets de airflow utilisant Docker, je veille à garder une clarté sur tout mes projets afin qu'ils ne se mélangent pas.
+--> comme je l'ai fait dans la définition de notre docker compose.
+
+3. Une fois que airflow est initialisé, on peut lancer le projet avec la commande : docker compose -p airflow_project1 up
+Une fois que tous les services se sont chargés, on peut accèder à l'interface airflow via : localhost:8080
+On s'y connecte avec les identifiants définis dans '.env' :
+_AIRFLOW_WWW_USER_USERNAME=admin_airflow
+_AIRFLOW_WWW_USER_PASSWORD=admin_password
+
+4. Ensuite, on se connecte sur l'interface pgamdin pour accèder à notre serveur postgres (logiquement vide): localhost:8082
+On s'y connecte avec les identifiants définis dans '.env' :
+PGADMIN_DEFAULT_EMAIL=admin_pgadmin@pgadmin.com
+PGADMIN_DEFAULT_PASSWORD=admin_password
+
+Nous allons donc configurer un nouveau serveur dans pgadmin pour accèder à la DB de postgres de notre service.
+--> question : est-il possible de créer plusieurs DB au sein d'un même service postgres? Utile?
+On choisit un nom pour notre serveur du pgadmin : postgres_destination_server
+Le host name= le nom de notre service dans docker : postgres_destination_serveur. Si pgadmin était hors Docker, alors on choisirait localhost ou 127.0.0.1
+Le port = 5432 (car c'est le port qui est exposé dans notre docker compose pour ce service)
+username = admin_postgres
+password = admin_password
+Une fois la configuration du serveur établi, on peut voir que notre DB "worldwide_sport" existe bel et bien.
+
+5. Nous allons créer une "connection" dans Airflow pour nous connecter à notre DB "worldwide_sport".
+Cette connexion est la même que celle que nous avons fait pour pgadmin, sauf qu'ici nous nommons une connection_id et non un serveur name.
+connection_id = postgreSQL_connection (nom de la variable correspondant à nnotre connection)
+connectiontype = postgres       
+host = postgres_destination_server      (nom du service dans docker)
+login = admin_postgres       
+password = admin_password
+port = 5432
+db = worldwide_sport
+
+
+6. Maintenant que tout nos services et connexions sont bien configurées, on peut commencer à créer notre DAG.
+# Import necessary libraries and modules
+
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.operators.dummy_operator import DummyOperator
+from airflow.operators.empty import EmptyOperator
+from airflow.decorators import task
+from airflow.utils.dates import days_ago
+from datetime import datetime
+from datetime import timedelta
+
+# 0) On doit commencer par expliquer le docker-compose, l'utilisation des volumes, etc.. (pour ensuite réexpliquer ici qu'on 
+# reprend les volumes qui ont été montés dans le docker-compose)
+
+# A) We define the default arguments for the DAG.
+default_args = {
+    'owner': 'Augustin'                  # owner of the DAG : the person who created it
+    ,'start_date': datetime(2025, 1, 1)  # define when the DAG should start running
+    ,'email_on_failure': False            # to send an email on failure : we do not use it here
+    ,'email_on_success': False            # to send an email on success : we do not use it here
+    ,'email_on_retry': False              # to send an email on retry : we do not use it here
+    ,'retries':2                         # number of retries in case of failure 
+    ,'retry_delay': timedelta(minutes=3)  # delay between retries 
+}
+
+# B) We define the DAG itself.
+ETL_dag = DAG(
+    dag_id = 'ETL_analytics_sport_shop',                               # DAG ID
+    default_args=default_args,                                         # Default arguments for the DAG (defined above)
+    description='ETL process for the analytics of the sport shop',     # Description of the DAG
+    tags=['ETL','PostgreSQL','Analytics','Docker','Flatfile','JSON'],  # Tags for the DAG
+    catchup= False,                                                    # Do not backfill past runs when DAG is created 
+                                                                       # Backfill means that Airflow will try to run the DAG for all past dates
+    schedule='0 0 * * *'                                               # Schedule interval (run at midnight every day)
+                                                                        # https://crontab.guru/ : very useful website to understand cron expressions
+)
+
+
+
+# C) We define the tasks in the DAG.
+
+# 1) The start point of the DAG, represented by a DummyOperator
+# expliquer à quoi il sert
+start = DummyOperator(
+    task_id='start',
+    dag=ETL_dag
+)
+
+
+# A good practice of Airflow is to separate the tasks into different scripts, and use a BashOperator to call these scripts.
+# Indeed, it is easier to maintain and debug the code this way. 
+# In our case, we will divide our ETL process into several scripts, each one responsible for a specific task:
+# 1) Extract and transform the JSON file into a big table in PostgreSQL
+# 2) Verify if the big table exists in PostgreSQL (this is just a check task) --> à supprimer?
+# 3) From the big table, we will create several tables in PostgreSQL : store_sales, daily_sales and payment_method. 
+# We will have a separate script for each table. Each script will retrieve the data from the big table in postgreSQL,
+# transform it and load it into the corresponding table in PostgreSQL.
+extract_and_transform_JSON = BashOperator(
+    task_id='extract_transform_big_table'
+    ,bash_command='python /opt/airflow/scripts/extract_transform_big_table.py'
+    #,execution_timeout = timedelta(minutes=1)
+    ,dag=ETL_dag
+)
+
+# Ajout au DAG
+check_table_task = BashOperator(
+    task_id='check_big_table_exists'
+    ,bash_command = 'python /opt/airflow/scripts/verify.py'
+    ,dag=ETL_dag
+)
+
+
+transform_store_sales = BashOperator(
+    task_id='transform_store_sales',
+    bash_command='python /opt/airflow/scripts/transform_store_sales.py',
+    dag=ETL_dag
+)
+
+transform_daily_sales = BashOperator(
+    task_id='transform_daily_sales',
+    bash_command='python /opt/airflow/scripts/transform_daily_sales.py',
+    dag=ETL_dag
+)
+
+transform_payment_method = BashOperator(
+    task_id='transform_payment_method',
+    bash_command='python /opt/airflow/scripts/transform_payment_method.py',
+    dag=ETL_dag
+)
+
+# 3) Once the tables are created, we will do some analysis and measurements on the data.
+    # We will store these analysis into views in postgreSQL, to be used in further analysis or in reporting tools like PowerBI.
+analysis_daily_sales = BashOperator(
+    task_id='analysis_daily_sales',
+    bash_command='python /opt/airflow/scripts/analysis_daily_sales.py',
+    dag=ETL_dag
+)
+
+analysis_store_sales = BashOperator(
+    task_id='analysis_store_sales',
+    bash_command='python /opt/airflow/scripts/analysis_store_sales.py',
+    dag=ETL_dag
+)
+
+analysis_payment_method = BashOperator(
+    task_id='analysis_payment_method',
+    bash_command='python /opt/airflow/scripts/analysis_payment_method.py',
+    dag=ETL_dag
+)
+
+# 4) The end point of the DAG, represented by a DummyOperator
+# expliquer à quoi il sert 
+stop = DummyOperator(
+    task_id='stop',
+    dag=ETL_dag
+)
+
+
+# D) We define the dependencies between the tasks in the DAG.
+start >> extract_and_transform_JSON
+
+extract_and_transform_JSON >> transform_store_sales
+extract_and_transform_JSON >> transform_daily_sales
+extract_and_transform_JSON >> transform_payment_method
+
+transform_store_sales >> analysis_store_sales
+transform_daily_sales >> analysis_daily_sales
+transform_payment_method >> analysis_payment_method
+
+[analysis_store_sales, analysis_daily_sales, analysis_payment_method] >> stop
+
+
+Comme nous venons de le voir, notre DAG comporte 9 tâches (dont 2 Dummy). Chacune des 7 tâches possède leur propre script python.
+De plus, j'ai également créé un module, appelé "postgres_utils", qui comprend des fonctions que je vais réutiliser lors des mes différentes tâches.
+Il s'agit d'une fonction me permettant de me connecter à postgresql ; une fonction stockant le résultat d'une query dans un dataframe 
+et une fonction permettant de créer une table postgreSQL.
+Etant donné qu'ici le focus n'est pas sur l'utilisation de postgresql en python, nous n'allons pas revenir sur l'explication de ces fonctions.
+La seule chose sur laquelle je veux insister est la connexion à postgresql. Il est possible de créer une connection directe à postgreSQL via 
+la librairie d'airflow : PostgresHook.  
+On peut se connecter directement à notre base de données PostgreSQL en utilisant notre connection précédemment créée : postgreSQL_connection
+
+
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+def connection_to_postgresql(postgres_conn_id):
+    """
+    Fonction qui se connecte à une base de données PostgreSQL et renvoie un curseur.
+    """
+    hook = PostgresHook(postgres_conn_id=postgres_conn_id)
+    conn = hook.get_conn()
+    cur = conn.cursor()
+    print("📌 Base utilisée :", conn.get_dsn_parameters().get('dbname'))
+    return {'cur':cur,'conn':conn}
+
+
+7. Une fois notre DAG créé, et les scripts également créés, nous pouvons attendre 30 secondes dans l'interface d'airflow pour que ce nouveau DAG apparaisse.
+Ensuite, il devrait être visible sous cette forme (insérer photo).
+On peut voir qu'il y a ' plusieurs parties interessantes :
+ - il y a 10 taches (comme on l'a définit')
+ - il est possible de voir les tâches sous forme de graphe. C'est une' autre manière visuelle de voir les dependencies que l'on a définies ' dans notre DAG. 
+ - on peut lancer le DAG manuellement en haut à droite.
+
+
+
+

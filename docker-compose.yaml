@@ -98,7 +98,7 @@ services:
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
     volumes:
-      - postgres-db-volume:/var/lib/postgresql/data
+      - postgres-db-volume-project1:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 10s
@@ -125,8 +125,6 @@ services:
     command: webserver
     ports:
       - "8080:8080"
-    environment:
-      - name=value
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s
@@ -292,32 +290,31 @@ services:
         condition: service_completed_successfully
 
 # PostgreSQL - Destination Database
-  postgres_destination_server:
+  postgres_destination_serveur:
       image: postgres:latest
       environment:
-        POSTGRES_USER : ${POSTGRES_USER}
-        POSTGRES_PASSWORD : ${POSTGRES_PASSWORD}
+        POSTGRES_USER : ${POSTGRES_USER:-admin}
+        POSTGRES_PASSWORD : ${POSTGRES_PASSWORD:-admin}
         POSTGRES_DB : ${POSTGRES_DB}
       ports: 
           - "5433:5432"
       restart: always
       volumes: 
-          - pg-data:/var/lib/postgresql/data/
-          - ./0_postgresql-scripts/:/docker-entrypoint-initdb.d
+          - pg-data-project1:/var/lib/postgresql/data/
 
 # pgadmin - PostgreSQL interface
-  pgadmin:
+  pgadmin_destination_serveur:
     image: dpage/pgadmin4:latest
     ports:
       - "8082:80"  # Map port 8082 on the host to port 80 in the container
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
     restart: always
     volumes:
-      - pgadmin-data:/var/lib/pgadmin
+      - pgadmin-data-project1:/var/lib/pgadmin
 
 volumes:
-  postgres-db-volume:
-  pg-data: # volume PostgreSQL - Destination Database
-  pgadmin-data: # volume pgadmin - PostgreSQL interface
+  postgres-db-volume-project1:  #volume postgreSQL - Airflow metadata Database
+  pg-data-project1: # volume PostgreSQL - Destination Database
+  pgadmin-data-project1: # volume pgadmin - PostgreSQL interface
